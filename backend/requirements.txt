@@ -1,0 +1,6 @@
+fastapi==0.141.1
+uvicorn[standard]==0.54.0
+pydantic-settings==2.15.0
+python-multipart==0.0.32
+google-genai==2.25.0
+sqlglot==30.19.0
