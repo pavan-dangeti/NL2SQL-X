@@ -21,7 +21,8 @@ class Settings(BaseSettings):
     llm_provider: Literal["gemini", "demo"] = "gemini"
     gemini_api_key: str | None = None
     gemini_model: str = "gemini-3.8-flash"
-    gemini_thinking_level: Literal["minimal", "low", "medium", "high"] | None = None
+    gemini_fallback_model: str | None = "gemini-3.5-flash-lite"
+    gemini_thinking_level: Literal["minimal", "low", "medium", "high"] | None = "low"
     llm_timeout_s: float = Field(default=30.0, gt=0)
     llm_max_retries: int = Field(default=2, ge=0, le=5)
 

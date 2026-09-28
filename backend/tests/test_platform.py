@@ -19,24 +19,27 @@ class FakeModels:
     def __init__(self, *outcomes):
         self.outcomes = list(outcomes)
         self.calls = 0
+        self.seen = []
 
-    async def generate_content(self, **_):
+    async def generate_content(self, **kwargs):
         self.calls += 1
+        self.seen.append((kwargs["model"], kwargs["config"].thinking_config))
         outcome = self.outcomes.pop(0)
         if isinstance(outcome, Exception):
             raise outcome
         return outcome
 
 
-def gemini(settings, *outcomes) -> tuple[GeminiLLM, FakeModels]:
-    llm = GeminiLLM(settings.model_copy(update={"gemini_api_key": "test-key", "llm_max_retries": 2}))
+def gemini(settings, *outcomes, **overrides) -> tuple[GeminiLLM, FakeModels]:
+    update = {"gemini_api_key": "test-key", "llm_max_retries": 2, "gemini_fallback_model": None, **overrides}
+    llm = GeminiLLM(settings.model_copy(update=update))
     models = FakeModels(*outcomes)
     llm._client = SimpleNamespace(aio=SimpleNamespace(models=models))
     return llm, models
 
 
-def api_error(code: int) -> errors.APIError:
-    return errors.APIError(code, {"error": {"code": code, "message": "x", "status": "X"}})
+def api_error(code: int, message: str = "x") -> errors.APIError:
+    return errors.APIError(code, {"error": {"code": code, "message": message, "status": "X"}})
 
 
 DRAFT = SqlDraft(answerable=True, sql="SELECT 1", explanation="one")
@@ -75,6 +78,41 @@ class TestGemini:
         llm, _ = gemini(settings, bad, bad, bad)
         with pytest.raises(LLMUnavailableError, match="unreadable"):
             await llm.draft("s", "p")
+
+    async def test_rate_limit_falls_back_to_second_model(self, settings, monkeypatch):
+        monkeypatch.setattr("app.llm.asyncio.sleep", _no_sleep)
+        ok = SimpleNamespace(parsed=DRAFT, text=None)
+        llm, models = gemini(
+            settings, api_error(429), api_error(429), api_error(429), ok, gemini_fallback_model="gemini-lite"
+        )
+        assert await llm.draft("s", "p") == DRAFT
+        assert [m for m, _ in models.seen] == ["gemini-3.8-flash"] * 3 + ["gemini-lite"]
+
+    async def test_rate_limit_message_when_all_models_are_exhausted(self, settings, monkeypatch):
+        monkeypatch.setattr("app.llm.asyncio.sleep", _no_sleep)
+        llm, _ = gemini(settings, *[api_error(429)] * 6, gemini_fallback_model="gemini-lite")
+        with pytest.raises(LLMUnavailableError, match="rate limit"):
+            await llm.draft("s", "p")
+
+    async def test_unsupported_thinking_level_is_dropped(self, settings):
+        ok = SimpleNamespace(parsed=DRAFT, text=None)
+        llm, models = gemini(
+            settings, api_error(400, "thinking_level is not supported"), ok, gemini_thinking_level="low"
+        )
+        assert await llm.draft("s", "p") == DRAFT
+        assert models.seen[0][1] is not None and models.seen[1][1] is None
+
+    async def test_server_retry_delay_is_respected(self, settings, monkeypatch):
+        waits = []
+
+        async def record(seconds):
+            waits.append(seconds)
+
+        monkeypatch.setattr("app.llm.asyncio.sleep", record)
+        ok = SimpleNamespace(parsed=DRAFT, text=None)
+        llm, _ = gemini(settings, api_error(429, "Please retry in 3.5s."), ok)
+        await llm.draft("s", "p")
+        assert waits == [3.5]
 
 
 async def _no_sleep(_):

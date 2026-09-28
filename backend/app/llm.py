@@ -18,7 +18,9 @@ class SqlDraft(BaseModel):
 
 
 class LLMUnavailableError(Exception):
-    pass
+    def __init__(self, message: str, fallback: bool = False) -> None:
+        super().__init__(message)
+        self.fallback = fallback
 
 
 class LLM(Protocol):
@@ -36,28 +38,45 @@ class GeminiLLM:
 
         self._types = types
         self._client = genai.Client(api_key=settings.gemini_api_key)
-        self.model = settings.gemini_model
-        self.name = f"gemini:{self.model}"
+        self.models = [settings.gemini_model, *[m for m in [settings.gemini_fallback_model] if m]]
+        self.name = f"gemini:{settings.gemini_model}"
         self.timeout = settings.llm_timeout_s
         self.retries = settings.llm_max_retries
         self.thinking = settings.gemini_thinking_level
 
-    async def draft(self, system: str, prompt: str) -> SqlDraft:
-        from google.genai import errors
-
+    def _config(self, system: str, thinking: str | None):
         types = self._types
-        config = types.GenerateContentConfig(
+        return types.GenerateContentConfig(
             system_instruction=system,
             temperature=0.0,
             max_output_tokens=2048,
             response_mime_type="application/json",
             response_schema=SqlDraft,
-            thinking_config=types.ThinkingConfig(thinking_level=self.thinking) if self.thinking else None,
+            thinking_config=types.ThinkingConfig(thinking_level=thinking) if thinking else None,
         )
+
+    async def draft(self, system: str, prompt: str) -> SqlDraft:
+        last: LLMUnavailableError | None = None
+        for model in dict.fromkeys(self.models):
+            try:
+                return await self._draft(model, system, prompt)
+            except LLMUnavailableError as exc:
+                last = exc
+                if not exc.fallback:
+                    raise
+                log.warning("llm_fallback", model=model)
+        raise last or LLMUnavailableError("The AI service is unavailable.")
+
+    async def _draft(self, model: str, system: str, prompt: str) -> SqlDraft:
+        from google.genai import errors
+
+        thinking = self.thinking
         for attempt in range(self.retries + 1):
             try:
                 response = await asyncio.wait_for(
-                    self._client.aio.models.generate_content(model=self.model, contents=prompt, config=config),
+                    self._client.aio.models.generate_content(
+                        model=model, contents=prompt, config=self._config(system, thinking)
+                    ),
                     timeout=self.timeout,
                 )
                 parsed = response.parsed
@@ -65,24 +84,44 @@ class GeminiLLM:
                     return parsed
                 return SqlDraft.model_validate_json(response.text or "")
             except errors.APIError as exc:
-                retry = exc.code in self.RETRYABLE and attempt < self.retries
-                log.warning("llm_api_error", code=exc.code, attempt=attempt, retry=retry)
-                if not retry:
-                    if exc.code in (400, 401, 403, 404):
-                        raise LLMUnavailableError(
-                            "The AI service rejected the request. Check the API key and model."
-                        ) from exc
-                    raise LLMUnavailableError("The AI service is busy. Please try again in a moment.") from exc
+                detail = str(getattr(exc, "message", "") or exc)[:300]
+                log.warning("llm_api_error", model=model, code=exc.code, attempt=attempt, detail=detail)
+                if exc.code == 400 and thinking and "think" in detail.lower():
+                    thinking = None
+                    continue
+                if exc.code in self.RETRYABLE and attempt < self.retries:
+                    await asyncio.sleep(_backoff(exc, attempt))
+                    continue
+                if exc.code == 429:
+                    raise LLMUnavailableError(
+                        "The Gemini rate limit for this API key was reached. Please wait a minute and try again.",
+                        fallback=True,
+                    ) from exc
+                if exc.code == 404:
+                    raise LLMUnavailableError(f"The model {model} is not available.", fallback=True) from exc
+                if exc.code in (400, 401, 403):
+                    raise LLMUnavailableError(
+                        "The AI service rejected the request. Check the API key and model."
+                    ) from exc
+                raise LLMUnavailableError(
+                    "The AI service is busy. Please try again in a moment.", fallback=True
+                ) from exc
             except TimeoutError as exc:
-                log.warning("llm_timeout", attempt=attempt)
+                log.warning("llm_timeout", model=model, attempt=attempt)
                 if attempt >= self.retries:
-                    raise LLMUnavailableError("The AI service timed out. Please try again.") from exc
+                    raise LLMUnavailableError("The AI service timed out. Please try again.", fallback=True) from exc
             except ValueError as exc:
-                log.warning("llm_bad_output", attempt=attempt, error=str(exc)[:200])
+                log.warning("llm_bad_output", model=model, attempt=attempt, error=str(exc)[:200])
                 if attempt >= self.retries:
                     raise LLMUnavailableError("The AI service returned an unreadable answer.") from exc
-            await asyncio.sleep(min(4.0, 0.5 * 2**attempt) + random.random() * 0.25)
-        raise LLMUnavailableError("The AI service is unavailable.")
+        raise LLMUnavailableError("The AI service is unavailable.", fallback=True)
+
+
+def _backoff(exc: Exception, attempt: int) -> float:
+    match = re.search(r"retry(?:Delay| in)[\"': ]+([\d.]+)s", str(exc), flags=re.IGNORECASE)
+    if match:
+        return min(float(match.group(1)), 8.0)
+    return min(4.0, 0.5 * 2**attempt) + random.random() * 0.25
 
 
 DEMO_ANSWERS: dict[str, tuple[str, str]] = {

@@ -11,7 +11,7 @@
 ![React](https://img.shields.io/badge/React-19-149ECA?logo=react&logoColor=white)
 ![TypeScript](https://img.shields.io/badge/TypeScript-strict-3178C6?logo=typescript&logoColor=white)
 ![Gemini](https://img.shields.io/badge/Gemini-structured%20output-8E75B2?logo=googlegemini&logoColor=white)
-![Tests](https://img.shields.io/badge/tests-227%20passing-2ea44f)
+![Tests](https://img.shields.io/badge/tests-231%20passing-2ea44f)
 ![Coverage](https://img.shields.io/badge/backend%20coverage-96%25-2ea44f)
 ![License](https://img.shields.io/badge/license-MIT-blue)
 
@@ -113,10 +113,10 @@ A generated query has to pass every layer below before it returns data:
 
 | Suite | Tests | What it covers |
 |---|---:|---|
-| Backend (pytest) | 167 | SQL guard attack cases, executor sandbox, ingestion, charts, insights, API contract, SSE streaming, pins, cache and in-flight dedupe, Gemini retry logic, config validation |
+| Backend (pytest) | 171 | SQL guard attack cases, executor sandbox, ingestion, charts, insights, API contract, SSE streaming, pins, cache and in-flight dedupe, Gemini retries and model fallback, config validation |
 | Frontend (Vitest + Testing Library) | 32 | Formatting, CSV escaping, SSE parser, API client, table, composer, command palette, result view |
 | End-to-end (Playwright) | 28 | Every button and view in a real browser: asking, view switching, downloads, share links, SQL editing, unsafe SQL, history, dashboard, upload, palette, shortcuts, theme, mobile |
-| **Total** | **227** | Backend line coverage: **96%** |
+| **Total** | **231** | Backend line coverage: **96%** |
 
 **Load test** (`scripts/load_test.py`, one Uvicorn worker, sample dataset, demo model so that only our own code is measured):
 
@@ -161,7 +161,8 @@ python scripts/load_test.py --base http://localhost:8000 --users 50
 |---|---|---|
 | `GEMINI_API_KEY` | — | Enables the model; without it the app runs in demo mode |
 | `GEMINI_MODEL` | `gemini-3.8-flash` | Any Gemini model that supports structured output |
-| `GEMINI_THINKING_LEVEL` | unset | Optional `minimal` / `low` / `medium` / `high` |
+| `GEMINI_FALLBACK_MODEL` | `gemini-3.5-flash-lite` | Used automatically when the main model is rate-limited or unavailable |
+| `GEMINI_THINKING_LEVEL` | `low` | `minimal` / `low` / `medium` / `high`; lower is faster. Dropped automatically if a model does not support it |
 | `LLM_PROVIDER` | `gemini` | Set to `demo` for keyless demos and tests |
 | `QUERY_TIMEOUT_MS` | `3000` | Per-query time budget |
 | `MAX_RESULT_ROWS` | `1000` | Row cap per answer |
